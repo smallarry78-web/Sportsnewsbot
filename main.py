@@ -1,102 +1,251 @@
 import asyncio
+import hashlib
 import logging
 import sqlite3
-import hashlib
 import feedparser
 
-from aiogram import Bot, Dispatcher
+from aiogram import Bot, Dispatcher, F
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
+from aiogram.filters import CommandStart
+from aiogram.types import (
+    Message,
+    CallbackQuery,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
+)
 
-from config import BOT_TOKEN, CHANNELS, RSS_FEEDS
+from config import (
+    BOT_TOKEN,
+    CHANNELS,
+    ADMIN_ID,
+    RSS_FEEDS,
+)
 
 logging.basicConfig(level=logging.INFO)
 
 bot = Bot(
     token=BOT_TOKEN,
-    default=DefaultBotProperties(parse_mode=ParseMode.HTML)
+    default=DefaultBotProperties(
+        parse_mode=ParseMode.HTML
+    )
 )
 
 dp = Dispatcher()
 
-# ---------------- DATABASE ---------------- #
+# ==========================
+# DATABASE
+# ==========================
 
 db = sqlite3.connect("sportsnews.db")
 cursor = db.cursor()
 
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS posted(
-id TEXT PRIMARY KEY
+    id TEXT PRIMARY KEY
 )
 """)
 
 db.commit()
 
-# ---------------- HASHTAGS ---------------- #
+# ==========================
+# CHANNEL BUTTONS
+# ==========================
 
-def hashtags(title):
+keyboard = InlineKeyboardMarkup(
+    inline_keyboard=[
+        [
+            InlineKeyboardButton(
+                text="📢 Breaking Sports News",
+                url="https://t.me/breakingsportsnews",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                text="⚽ Football Daily News",
+                url="https://t.me/footballdnews",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                text="🏆 Sports World Update",
+                url="https://t.me/sportworldupdate",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                text="✅ I've Joined",
+                callback_data="joined",
+            )
+        ],
+    ]
+)
 
-    t = title.lower()
+# ==========================
+# DUPLICATE CHECK
+# ==========================
 
-    tags = []
+def article_id(link):
 
-    if "football" in t or "premier league" in t or "arsenal" in t or "chelsea" in t or "liverpool" in t or "manchester" in t:
-        tags.append("#Football")
+    return hashlib.md5(link.encode()).hexdigest()
 
-    if "nba" in t or "basketball" in t or "lakers" in t:
-        tags.append("#NBA")
 
-    if "tennis" in t or "wimbledon" in t:
-        tags.append("#Tennis")
+def exists(uid):
 
-    if "f1" in t or "formula" in t:
-        tags.append("#Formula1")
-
-    if not tags:
-        tags.append("#Sports")
-
-    return " ".join(tags)
-
-# ---------------- DUPLICATE CHECK ---------------- #
-
-def already_posted(uid):
-
-    cursor.execute("SELECT id FROM posted WHERE id=?", (uid,))
+    cursor.execute(
+        "SELECT id FROM posted WHERE id=?",
+        (uid,),
+    )
 
     return cursor.fetchone() is not None
 
+
 def save(uid):
 
-    cursor.execute("INSERT INTO posted VALUES(?)", (uid,))
+    cursor.execute(
+        "INSERT INTO posted VALUES(?)",
+        (uid,),
+    )
 
     db.commit()
 
-# ---------------- FORMAT ---------------- #
+# ==========================
+# HASHTAGS
+# ==========================
 
-def build_message(item):
+def get_tags(title):
+
+    title = title.lower()
+
+    if "football" in title:
+        return "#Football"
+
+    if "premier league" in title:
+        return "#Football"
+
+    if "arsenal" in title:
+        return "#Football"
+
+    if "chelsea" in title:
+        return "#Football"
+
+    if "liverpool" in title:
+        return "#Football"
+
+    if "nba" in title:
+        return "#NBA"
+
+    if "basketball" in title:
+        return "#NBA"
+
+    if "tennis" in title:
+        return "#Tennis"
+
+    if "formula" in title:
+        return "#Formula1"
+
+    return "#Sports"
+
+# ==========================
+# CHECK USER MEMBERSHIP
+# ==========================
+
+async def joined_all(user_id):
+
+    try:
+
+        for channel in CHANNELS:
+
+            member = await bot.get_chat_member(
+                channel,
+                user_id,
+            )
+
+            if member.status in [
+                "left",
+                "kicked",
+            ]:
+
+                return False
+
+        return True
+
+    except Exception as e:
+
+        print(e)
+
+        return False# ==========================
+# /START
+# ==========================
+
+@dp.message(CommandStart())
+async def start(message: Message):
+
+    if not await joined_all(message.from_user.id):
+
+        await message.answer(
+            "🚫 You must join all 3 channels before using this bot.\n\n"
+            "Join the channels below and press ✅ I've Joined.",
+            reply_markup=keyboard,
+        )
+        return
+
+    await message.answer(
+        "✅ Welcome to Sports News Auto Bot!\n\n"
+        "You'll receive the latest sports updates."
+    )
+
+
+# ==========================
+# VERIFY BUTTON
+# ==========================
+
+@dp.callback_query(F.data == "joined")
+async def verify(callback: CallbackQuery):
+
+    if await joined_all(callback.from_user.id):
+
+        await callback.message.edit_text(
+            "✅ Verification Successful!\n\n"
+            "You now have access to Sports News Auto Bot."
+        )
+
+    else:
+
+        await callback.answer(
+            "❌ You haven't joined all required channels.",
+            show_alert=True,
+        )
+
+
+# ==========================
+# BUILD POST
+# ==========================
+
+def build_post(item):
 
     title = item.title
 
     link = item.link
 
-    tag = hashtags(title)
+    tags = get_tags(title)
 
-    text = f"""
+    return f"""
 🏆 <b>BREAKING SPORTS NEWS</b>
 
 📰 <b>{title}</b>
 
-👉 Read More:
-{link}
+👉 <a href="{link}">Read Full Story</a>
 
-{tag}
+{tags}
 """
 
-    return text.strip()
 
-# ---------------- RSS CHECK ---------------- #
+# ==========================
+# CHECK RSS
+# ==========================
 
-async def check_news():
+async def rss_checker():
 
     while True:
 
@@ -104,44 +253,61 @@ async def check_news():
 
             for feed in RSS_FEEDS:
 
-                news = feedparser.parse(feed)
+                rss = feedparser.parse(feed)
 
-                for item in news.entries[:5]:
+                if not rss.entries:
+                    continue
 
-                    uid = hashlib.md5(item.link.encode()).hexdigest()
+                for item in rss.entries[:10]:
 
-                    if already_posted(uid):
+                    uid = article_id(item.link)
+
+                    if exists(uid):
                         continue
 
-                    msg = build_message(item)
+                    post = build_post(item)
 
                     for channel in CHANNELS:
 
                         try:
 
-                            await bot.send_message(channel, msg)
+                            await bot.send_message(
+                                chat_id=channel,
+                                text=post,
+                                disable_web_page_preview=False,
+                            )
 
                         except Exception as e:
 
-                            print(e)
+                            logging.error(
+                                f"{channel}: {e}"
+                            )
 
                     save(uid)
 
-                    print("Posted:", item.title)
+                    logging.info(
+                        f"Posted: {item.title}"
+                    )
 
         except Exception as e:
 
-            print(e)
+            logging.error(e)
 
         await asyncio.sleep(30)
 
-# ---------------- START ---------------- #
+
+# ==========================
+# MAIN
+# ==========================
 
 async def main():
 
-    asyncio.create_task(check_news())
+    asyncio.create_task(
+        rss_checker()
+    )
 
     await dp.start_polling(bot)
+
 
 if __name__ == "__main__":
 
